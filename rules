@@ -1,44 +1,176 @@
-const G_OUT = "BROKER"; // 与 proxy-groups 里出口组名一致
+// ========== 可按需修改 ==========
+const US_REGEX = /(🇺🇸|美国|美区|洛杉矶|硅谷|西雅图|纽约|芝加哥|达拉斯|旧金山|US\b|US-|【US】|United States|Los Angeles|San Jose|Seattle|New York|Chicago|Dallas|Silicon|USA)/i;
+const JP_REGEX = /(🇯🇵|日本|日区|东京|大阪|京都|JP\b|JP-|【JP】|Japan|Tokyo|Osaka)/i;
 
-/** 需要永远压在 Geo 前面的规则（越靠前越优先） */
-const BROKER_BLOCK = [
-  "DOMAIN-SUFFIX,futunn.com," + G_OUT,
-  "DOMAIN-SUFFIX,futu.com," + G_OUT,
-  "DOMAIN-SUFFIX,moomoo.com," + G_OUT,
-  "RULE-SET,Broker," + G_OUT,
+// 节点名特殊时：把 Proxies 页复制的完整名字贴进数组（优先于正则）
+const MANUAL_US = [
+  // "🇺🇸 美国 01",
+];
+const MANUAL_JP = [
+  // "🇯🇵 日本 01",
 ];
 
-/** 是否属于「中国大陆 → DIRECT」类 Geo 规则（会从原位置抽走，统一后移） */
+// 从连接页补仍走 GEOIP 的域名/IP（写在 BROKER_BLOCK 最前）
+const EXTRA_BROKER_RULES = [
+  // "DOMAIN,api5.futunn.com",
+  // "IP-CIDR,119.91.244.0/23,no-resolve",
+];
+
+const G_US = "BROKER-US";
+const G_JP = "BROKER-JP";
+const G_OUT = "BROKER";
+// ================================
+
+const MINE_GROUPS = new Set([G_US, G_JP, G_OUT]);
+
+function isGroup(config, name) {
+  return (config["proxy-groups"] || []).some((g) => g.name === name);
+}
+
+function leafNames(config) {
+  const set = new Set();
+  (config.proxies || []).forEach((p) => p.name && set.add(p.name));
+  (config["proxy-groups"] || []).forEach((g) => {
+    (g.proxies || []).forEach((n) => {
+      if (
+        typeof n === "string" &&
+        !["DIRECT", "REJECT", "GLOBAL"].includes(n) &&
+        !isGroup(config, n)
+      ) {
+        set.add(n);
+      }
+    });
+  });
+  return [...set];
+}
+
+function membersFromNamedGroups(config, nameRe) {
+  const out = [];
+  for (const g of config["proxy-groups"] || []) {
+    if (MINE_GROUPS.has(g.name)) continue;
+    if (!nameRe.test(g.name || "")) continue;
+    for (const n of g.proxies || []) {
+      if (typeof n !== "string" || ["DIRECT", "REJECT", "GLOBAL"].includes(n))
+        continue;
+      if (isGroup(config, n)) continue;
+      out.push(n);
+    }
+  }
+  return [...new Set(out)];
+}
+
+function pick(list, re) {
+  return [...new Set(list.filter((n) => re.test(n)))];
+}
+
 function isCnGeoRule(line) {
   const s = String(line).replace(/\s/g, "");
   return /^(GEOIP,CN|GEOSITE,cn|GEOIP,china)/i.test(s);
 }
 
+function buildBrokerBlock() {
+  const head = [
+    "DOMAIN-SUFFIX,futunn.com," + G_OUT,
+    "DOMAIN-SUFFIX,futu.com," + G_OUT,
+    "DOMAIN-SUFFIX,moomoo.com," + G_OUT,
+    "DOMAIN-SUFFIX,futuhk.com," + G_OUT,
+    "DOMAIN-SUFFIX,futuhn.com," + G_OUT,
+  ];
+  const extra = EXTRA_BROKER_RULES.map((r) => {
+    const parts = String(r).split(",");
+    if (parts.length >= 3) return r;
+    return r + "," + G_OUT;
+  });
+  return extra.concat(head).concat(["RULE-SET,Broker," + G_OUT]);
+}
+
 function reorderRulesForBroker(rules) {
   rules = rules || [];
+  const brokerBlock = buildBrokerBlock();
+  const brokerKeys = new Set(
+    brokerBlock.map((r) => {
+      const p = String(r).split(",");
+      return p.length >= 2 ? p[0] + "," + p[1] : String(r);
+    })
+  );
 
-  // 1) 去掉旧的 Broker 相关行，避免重复
   const body = rules.filter((r) => {
     const s = String(r);
     if (s.startsWith("RULE-SET,Broker,")) return false;
-    if (s.includes("futunn.com") && s.includes(G_OUT)) return false;
+    const p = s.split(",");
+    if (p.length >= 2) {
+      const key = p[0] + "," + p[1];
+      if (brokerKeys.has(key) && s.endsWith("," + G_OUT)) return false;
+    }
     return true;
   });
 
-  // 2) 抽出所有 CN Geo 规则
   const cnGeo = body.filter(isCnGeoRule);
   const middle = body.filter((r) => !isCnGeoRule(r));
-
-  // 3) 组装：Broker 块 → 其它规则 → CN Geo → 保证 MATCH 仍在最后
   const withoutMatch = middle.filter((r) => !String(r).startsWith("MATCH,"));
   const matchRules = middle.filter((r) => String(r).startsWith("MATCH,"));
 
-  return BROKER_BLOCK.concat(withoutMatch).concat(cnGeo).concat(matchRules);
+  return brokerBlock.concat(withoutMatch).concat(cnGeo).concat(matchRules);
+}
+
+function setupProxyGroups(config) {
+  const leaves = leafNames(config);
+
+  let us = MANUAL_US.length ? [...MANUAL_US] : pick(leaves, US_REGEX);
+  let jp = MANUAL_JP.length ? [...MANUAL_JP] : pick(leaves, JP_REGEX);
+
+  if (!us.length) {
+    us = membersFromNamedGroups(
+      config,
+      /(🇺🇸|美国|美区|\bUS\b|United States|USA|洛杉矶|纽约)/i
+    );
+  }
+  if (!jp.length) {
+    jp = membersFromNamedGroups(
+      config,
+      /(🇯🇵|日本|日区|\bJP\b|Japan|东京|大阪)/i
+    );
+  }
+
+  const myGroups = [
+    {
+      name: G_US,
+      type: "select",
+      proxies: us.length ? us : ["DIRECT"],
+    },
+    {
+      name: G_JP,
+      type: "select",
+      proxies: jp.length ? jp : ["DIRECT"],
+    },
+    {
+      name: G_OUT,
+      type: "select",
+      proxies: ["DIRECT", G_US, G_JP],
+    },
+  ];
+
+  const rest = (config["proxy-groups"] || []).filter((g) => {
+    const n = (g.name || "").trim();
+    return n && !MINE_GROUPS.has(n);
+  });
+
+  config["proxy-groups"] = myGroups.concat(rest);
 }
 
 function main(config) {
-  // … 你原来的 rule-providers、proxy-groups 等 …
+  config["rule-providers"] = Object.assign({}, config["rule-providers"], {
+    Broker: {
+      type: "http",
+      behavior: "classical",
+      format: "yaml",
+      url: "https://raw.githubusercontent.com/forecho/broker-rules/master/rule/Clash/Broker.yaml",
+      path: "./ruleset/Broker.yaml",
+      interval: 86400,
+    },
+  });
 
+  setupProxyGroups(config);
   config.rules = reorderRulesForBroker(config.rules);
 
   return config;
