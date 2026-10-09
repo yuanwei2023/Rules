@@ -2,15 +2,9 @@
 const US_REGEX = /(🇺🇸|美国|美区|洛杉矶|硅谷|西雅图|纽约|芝加哥|达拉斯|旧金山|US\b|US-|【US】|United States|Los Angeles|San Jose|Seattle|New York|Chicago|Dallas|Silicon|USA)/i;
 const JP_REGEX = /(🇯🇵|日本|日区|东京|大阪|京都|JP\b|JP-|【JP】|Japan|Tokyo|Osaka)/i;
 
-// 节点名特殊时：把 Proxies 页复制的完整名字贴进数组（优先于正则）
-const MANUAL_US = [
-  // "🇺🇸 美国 01",
-];
-const MANUAL_JP = [
-  // "🇯🇵 日本 01",
-];
+const MANUAL_US = [];
+const MANUAL_JP = [];
 
-// 从连接页补仍走 GEOIP 的域名/IP（写在 BROKER_BLOCK 最前）
 const EXTRA_BROKER_RULES = [
   // "DOMAIN,api5.futunn.com",
   // "IP-CIDR,119.91.244.0/23,no-resolve",
@@ -19,9 +13,10 @@ const EXTRA_BROKER_RULES = [
 const G_US = "BROKER-US";
 const G_JP = "BROKER-JP";
 const G_OUT = "BROKER";
-// ================================
 
 const MINE_GROUPS = new Set([G_US, G_JP, G_OUT]);
+const UI_ENTRY_GROUPS = ["GLOBAL", "节点选择", "Proxy", "PROXY"];
+// ================================
 
 function isGroup(config, name) {
   return (config["proxy-groups"] || []).some((g) => g.name === name);
@@ -63,59 +58,8 @@ function pick(list, re) {
   return [...new Set(list.filter((n) => re.test(n)))];
 }
 
-function isCnGeoRule(line) {
-  const s = String(line).replace(/\s/g, "");
-  return /^(GEOIP,CN|GEOSITE,cn|GEOIP,china)/i.test(s);
-}
-
-function buildBrokerBlock() {
-  const head = [
-    "DOMAIN-SUFFIX,futunn.com," + G_OUT,
-    "DOMAIN-SUFFIX,futu.com," + G_OUT,
-    "DOMAIN-SUFFIX,moomoo.com," + G_OUT,
-    "DOMAIN-SUFFIX,futuhk.com," + G_OUT,
-    "DOMAIN-SUFFIX,futuhn.com," + G_OUT,
-  ];
-  const extra = EXTRA_BROKER_RULES.map((r) => {
-    const parts = String(r).split(",");
-    if (parts.length >= 3) return r;
-    return r + "," + G_OUT;
-  });
-  return extra.concat(head).concat(["RULE-SET,Broker," + G_OUT]);
-}
-
-function reorderRulesForBroker(rules) {
-  rules = rules || [];
-  const brokerBlock = buildBrokerBlock();
-  const brokerKeys = new Set(
-    brokerBlock.map((r) => {
-      const p = String(r).split(",");
-      return p.length >= 2 ? p[0] + "," + p[1] : String(r);
-    })
-  );
-
-  const body = rules.filter((r) => {
-    const s = String(r);
-    if (s.startsWith("RULE-SET,Broker,")) return false;
-    const p = s.split(",");
-    if (p.length >= 2) {
-      const key = p[0] + "," + p[1];
-      if (brokerKeys.has(key) && s.endsWith("," + G_OUT)) return false;
-    }
-    return true;
-  });
-
-  const cnGeo = body.filter(isCnGeoRule);
-  const middle = body.filter((r) => !isCnGeoRule(r));
-  const withoutMatch = middle.filter((r) => !String(r).startsWith("MATCH,"));
-  const matchRules = middle.filter((r) => String(r).startsWith("MATCH,"));
-
-  return brokerBlock.concat(withoutMatch).concat(cnGeo).concat(matchRules);
-}
-
-function setupProxyGroups(config) {
+function buildMyBrokerGroups(config) {
   const leaves = leafNames(config);
-
   let us = MANUAL_US.length ? [...MANUAL_US] : pick(leaves, US_REGEX);
   let jp = MANUAL_JP.length ? [...MANUAL_JP] : pick(leaves, JP_REGEX);
 
@@ -132,33 +76,74 @@ function setupProxyGroups(config) {
     );
   }
 
-  const myGroups = [
-    {
-      name: G_US,
-      type: "select",
-      proxies: us.length ? us : ["DIRECT"],
-    },
-    {
-      name: G_JP,
-      type: "select",
-      proxies: jp.length ? jp : ["DIRECT"],
-    },
-    {
-      name: G_OUT,
-      type: "select",
-      proxies: ["DIRECT", G_US, G_JP],
-    },
+  return [
+    { name: G_US, type: "select", proxies: us.length ? us : ["DIRECT"] },
+    { name: G_JP, type: "select", proxies: jp.length ? jp : ["DIRECT"] },
+    { name: G_OUT, type: "select", proxies: ["DIRECT", G_US, G_JP] },
   ];
+}
 
+/** 旧版能显示的关键：三组放在 proxy-groups 最前面 */
+function setupProxyGroups(config) {
+  const myGroups = buildMyBrokerGroups(config);
   const rest = (config["proxy-groups"] || []).filter((g) => {
     const n = (g.name || "").trim();
     return n && !MINE_GROUPS.has(n);
   });
-
   config["proxy-groups"] = myGroups.concat(rest);
 }
 
+/** FlClash：把 BROKER 挂到入口组，否则代理页可能不展示 */
+function exposeGroupsInFlClashUI(config) {
+  const inject = [G_OUT, G_US, G_JP];
+  for (const g of config["proxy-groups"] || []) {
+    if (!UI_ENTRY_GROUPS.includes(g.name)) continue;
+    if (!Array.isArray(g.proxies)) g.proxies = [];
+    const rest = g.proxies.filter((p) => !inject.includes(p));
+    g.proxies = inject.concat(rest);
+  }
+}
+
+function isCnGeoRule(line) {
+  const s = String(line).replace(/\s/g, "");
+  return /^(GEOIP,CN|GEOSITE,cn|GEOIP,china)/i.test(s);
+}
+
+function buildBrokerBlock() {
+  const head = [
+    "DOMAIN-SUFFIX,futunn.com," + G_OUT,
+    "DOMAIN-SUFFIX,futu.com," + G_OUT,
+    "DOMAIN-SUFFIX,moomoo.com," + G_OUT,
+    "DOMAIN-SUFFIX,futuhk.com," + G_OUT,
+    "DOMAIN-SUFFIX,futuhn.com," + G_OUT,
+  ];
+  const extra = (EXTRA_BROKER_RULES || []).map((r) => {
+    const s = String(r).trim();
+    if (!s) return null;
+    const parts = s.split(",");
+    return parts.length >= 3 ? s : s + "," + G_OUT;
+  }).filter(Boolean);
+  return extra.concat(head).concat(["RULE-SET,Broker," + G_OUT]);
+}
+
+function reorderRulesForBroker(rules) {
+  rules = Array.isArray(rules) ? rules : [];
+  const brokerBlock = buildBrokerBlock();
+
+  const body = rules.filter((r) => !String(r).startsWith("RULE-SET,Broker,"));
+  const cnGeo = body.filter(isCnGeoRule);
+  const middle = body.filter((r) => !isCnGeoRule(r));
+  const withoutMatch = middle.filter((r) => !String(r).startsWith("MATCH,"));
+  const matchRules = middle.filter((r) => String(r).startsWith("MATCH,"));
+
+  return brokerBlock.concat(withoutMatch).concat(cnGeo).concat(matchRules);
+}
+
 function main(config) {
+  config = config || {};
+  config["proxy-groups"] = config["proxy-groups"] || [];
+  config.rules = config.rules || [];
+
   config["rule-providers"] = Object.assign({}, config["rule-providers"], {
     Broker: {
       type: "http",
@@ -171,7 +156,14 @@ function main(config) {
   });
 
   setupProxyGroups(config);
-  config.rules = reorderRulesForBroker(config.rules);
+  exposeGroupsInFlClashUI(config);
+
+  try {
+    config.rules = reorderRulesForBroker(config.rules);
+  } catch (e) {
+    // 规则重排失败也不影响策略组注入
+    config.rules = buildBrokerBlock().concat(config.rules);
+  }
 
   return config;
 }
