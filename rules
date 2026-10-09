@@ -1,86 +1,45 @@
-const US_REGEX = /(🇺🇸|美国|美区|洛杉矶|硅谷|西雅图|纽约|芝加哥|达拉斯|旧金山|US\b|US-|【US】|United States|Los Angeles|San Jose|Seattle|New York|Chicago|Dallas|Silicon)/i;
-const JP_REGEX = /(🇯🇵|日本|日区|东京|大阪|京都|JP\b|JP-|【JP】|Japan|Tokyo|Osaka)/i;
+const G_OUT = "BROKER"; // 与 proxy-groups 里出口组名一致
 
-// 订阅节点名若很特殊，把完整名字贴进这里（优先于正则）
-const MANUAL_US = [
-  // "🇺🇸 美国 01",
+/** 需要永远压在 Geo 前面的规则（越靠前越优先） */
+const BROKER_BLOCK = [
+  "DOMAIN-SUFFIX,futunn.com," + G_OUT,
+  "DOMAIN-SUFFIX,futu.com," + G_OUT,
+  "DOMAIN-SUFFIX,moomoo.com," + G_OUT,
+  "RULE-SET,Broker," + G_OUT,
 ];
-const MANUAL_JP = [
-  // "🇯🇵 日本 01",
-];
 
-const G_US = "BROKER-US";
-const G_JP = "BROKER-JP";
-const G_OUT = "BROKER";
-
-function isGroup(config, name) {
-  return (config["proxy-groups"] || []).some(g => g.name === name);
+/** 是否属于「中国大陆 → DIRECT」类 Geo 规则（会从原位置抽走，统一后移） */
+function isCnGeoRule(line) {
+  const s = String(line).replace(/\s/g, "");
+  return /^(GEOIP,CN|GEOSITE,cn|GEOIP,china)/i.test(s);
 }
 
-function leafNames(config) {
-  const set = new Set();
-  (config.proxies || []).forEach(p => p.name && set.add(p.name));
-  (config["proxy-groups"] || []).forEach(g => {
-    (g.proxies || []).forEach(n => {
-      if (typeof n === "string" && !["DIRECT", "REJECT", "GLOBAL"].includes(n) && !isGroup(config, n))
-        set.add(n);
-    });
+function reorderRulesForBroker(rules) {
+  rules = rules || [];
+
+  // 1) 去掉旧的 Broker 相关行，避免重复
+  const body = rules.filter((r) => {
+    const s = String(r);
+    if (s.startsWith("RULE-SET,Broker,")) return false;
+    if (s.includes("futunn.com") && s.includes(G_OUT)) return false;
+    return true;
   });
-  return [...set];
-}
 
-function membersFromNamedGroups(config, nameRe) {
-  const out = [];
-  for (const g of config["proxy-groups"] || []) {
-    if (!nameRe.test(g.name || "")) continue;
-    for (const n of g.proxies || []) {
-      if (typeof n !== "string" || ["DIRECT", "REJECT"].includes(n)) continue;
-      if (isGroup(config, n)) continue;
-      out.push(n);
-    }
-  }
-  return [...new Set(out)];
-}
+  // 2) 抽出所有 CN Geo 规则
+  const cnGeo = body.filter(isCnGeoRule);
+  const middle = body.filter((r) => !isCnGeoRule(r));
 
-function pick(list, re) {
-  const fromRe = list.filter(n => re.test(n));
-  return [...new Set(fromRe)];
+  // 3) 组装：Broker 块 → 其它规则 → CN Geo → 保证 MATCH 仍在最后
+  const withoutMatch = middle.filter((r) => !String(r).startsWith("MATCH,"));
+  const matchRules = middle.filter((r) => String(r).startsWith("MATCH,"));
+
+  return BROKER_BLOCK.concat(withoutMatch).concat(cnGeo).concat(matchRules);
 }
 
 function main(config) {
-  config["rule-providers"] = Object.assign({}, config["rule-providers"], {
-    Broker: {
-      type: "http",
-      behavior: "classical",
-      format: "yaml",
-      url: "https://raw.githubusercontent.com/forecho/broker-rules/master/rule/Clash/Broker.yaml",
-      path: "./ruleset/Broker.yaml",
-      interval: 86400,
-    },
-  });
+  // … 你原来的 rule-providers、proxy-groups 等 …
 
-  const leaves = leafNames(config);
-  let us = MANUAL_US.length ? [...MANUAL_US] : pick(leaves, US_REGEX);
-  let jp = MANUAL_JP.length ? [...MANUAL_JP] : pick(leaves, JP_REGEX);
-
-  if (!us.length) us = membersFromNamedGroups(config, /(🇺🇸|美国|美区|\bUS\b|United States|USA)/i);
-  if (!jp.length) jp = membersFromNamedGroups(config, /(🇯🇵|日本|日区|\bJP\b|Japan)/i);
-
-  const mineNames = new Set([G_US, G_JP, G_OUT]);
-  const myGroups = [
-    { name: G_US, type: "select", proxies: us.length ? us : ["DIRECT"] },
-    { name: G_JP, type: "select", proxies: jp.length ? jp : ["DIRECT"] },
-    { name: G_OUT, type: "select", proxies: ["DIRECT", G_US, G_JP] },
-  ];
-
-  config["proxy-groups"] = myGroups.concat(
-    (config["proxy-groups"] || []).filter(g => g.name && !mineNames.has(g.name.trim()))
-  );
-
-  const head = `RULE-SET,Broker,${G_OUT}`;
-  const rules = config.rules || [];
-  if (!rules.some(r => String(r).startsWith("RULE-SET,Broker,")))
-    config.rules = [head].concat(rules);
+  config.rules = reorderRulesForBroker(config.rules);
 
   return config;
 }
