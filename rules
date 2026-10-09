@@ -1,0 +1,86 @@
+const US_REGEX = /(🇺🇸|美国|美区|洛杉矶|硅谷|西雅图|纽约|芝加哥|达拉斯|旧金山|US\b|US-|【US】|United States|Los Angeles|San Jose|Seattle|New York|Chicago|Dallas|Silicon)/i;
+const JP_REGEX = /(🇯🇵|日本|日区|东京|大阪|京都|JP\b|JP-|【JP】|Japan|Tokyo|Osaka)/i;
+
+// 订阅节点名若很特殊，把完整名字贴进这里（优先于正则）
+const MANUAL_US = [
+  // "🇺🇸 美国 01",
+];
+const MANUAL_JP = [
+  // "🇯🇵 日本 01",
+];
+
+const G_US = "BROKER-US";
+const G_JP = "BROKER-JP";
+const G_OUT = "BROKER";
+
+function isGroup(config, name) {
+  return (config["proxy-groups"] || []).some(g => g.name === name);
+}
+
+function leafNames(config) {
+  const set = new Set();
+  (config.proxies || []).forEach(p => p.name && set.add(p.name));
+  (config["proxy-groups"] || []).forEach(g => {
+    (g.proxies || []).forEach(n => {
+      if (typeof n === "string" && !["DIRECT", "REJECT", "GLOBAL"].includes(n) && !isGroup(config, n))
+        set.add(n);
+    });
+  });
+  return [...set];
+}
+
+function membersFromNamedGroups(config, nameRe) {
+  const out = [];
+  for (const g of config["proxy-groups"] || []) {
+    if (!nameRe.test(g.name || "")) continue;
+    for (const n of g.proxies || []) {
+      if (typeof n !== "string" || ["DIRECT", "REJECT"].includes(n)) continue;
+      if (isGroup(config, n)) continue;
+      out.push(n);
+    }
+  }
+  return [...new Set(out)];
+}
+
+function pick(list, re) {
+  const fromRe = list.filter(n => re.test(n));
+  return [...new Set(fromRe)];
+}
+
+function main(config) {
+  config["rule-providers"] = Object.assign({}, config["rule-providers"], {
+    Broker: {
+      type: "http",
+      behavior: "classical",
+      format: "yaml",
+      url: "https://raw.githubusercontent.com/forecho/broker-rules/master/rule/Clash/Broker.yaml",
+      path: "./ruleset/Broker.yaml",
+      interval: 86400,
+    },
+  });
+
+  const leaves = leafNames(config);
+  let us = MANUAL_US.length ? [...MANUAL_US] : pick(leaves, US_REGEX);
+  let jp = MANUAL_JP.length ? [...MANUAL_JP] : pick(leaves, JP_REGEX);
+
+  if (!us.length) us = membersFromNamedGroups(config, /(🇺🇸|美国|美区|\bUS\b|United States|USA)/i);
+  if (!jp.length) jp = membersFromNamedGroups(config, /(🇯🇵|日本|日区|\bJP\b|Japan)/i);
+
+  const mineNames = new Set([G_US, G_JP, G_OUT]);
+  const myGroups = [
+    { name: G_US, type: "select", proxies: us.length ? us : ["DIRECT"] },
+    { name: G_JP, type: "select", proxies: jp.length ? jp : ["DIRECT"] },
+    { name: G_OUT, type: "select", proxies: ["DIRECT", G_US, G_JP] },
+  ];
+
+  config["proxy-groups"] = myGroups.concat(
+    (config["proxy-groups"] || []).filter(g => g.name && !mineNames.has(g.name.trim()))
+  );
+
+  const head = `RULE-SET,Broker,${G_OUT}`;
+  const rules = config.rules || [];
+  if (!rules.some(r => String(r).startsWith("RULE-SET,Broker,")))
+    config.rules = [head].concat(rules);
+
+  return config;
+}
