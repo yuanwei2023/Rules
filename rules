@@ -13,8 +13,10 @@ const EXTRA_BROKER_RULES = [
 const G_US = "BROKER-US";
 const G_JP = "BROKER-JP";
 const G_OUT = "BROKER";
+const G_GPT = "ChatGPT";
+const G_CLAUDE = "Claude";
 
-const MINE_GROUPS = new Set([G_US, G_JP, G_OUT]);
+const MINE_GROUPS = new Set([G_US, G_JP, G_OUT, G_GPT, G_CLAUDE]);
 const UI_ENTRY_GROUPS = ["GLOBAL", "节点选择", "Proxy", "PROXY"];
 // ================================
 
@@ -83,9 +85,19 @@ function buildMyBrokerGroups(config) {
   ];
 }
 
-/** 旧版能显示的关键：三组放在 proxy-groups 最前面 */
+/** AI 组：默认走美国，其次日本，也可手选任意节点（OpenAI/Claude 不支持 CN/HK） */
+function buildAiGroups(config) {
+  const leaves = leafNames(config);
+  const proxies = [G_US, G_JP].concat(leaves);
+  return [
+    { name: G_GPT, type: "select", proxies: [...proxies] },
+    { name: G_CLAUDE, type: "select", proxies: [...proxies] },
+  ];
+}
+
+/** 旧版能显示的关键：自建组放在 proxy-groups 最前面 */
 function setupProxyGroups(config) {
-  const myGroups = buildMyBrokerGroups(config);
+  const myGroups = buildMyBrokerGroups(config).concat(buildAiGroups(config));
   const rest = (config["proxy-groups"] || []).filter((g) => {
     const n = (g.name || "").trim();
     return n && !MINE_GROUPS.has(n);
@@ -95,7 +107,7 @@ function setupProxyGroups(config) {
 
 /** FlClash：把 BROKER 挂到入口组，否则代理页可能不展示 */
 function exposeGroupsInFlClashUI(config) {
-  const inject = [G_OUT, G_US, G_JP];
+  const inject = [G_OUT, G_US, G_JP, G_GPT, G_CLAUDE];
   for (const g of config["proxy-groups"] || []) {
     if (!UI_ENTRY_GROUPS.includes(g.name)) continue;
     if (!Array.isArray(g.proxies)) g.proxies = [];
@@ -126,11 +138,30 @@ function buildBrokerBlock() {
   return extra.concat(head).concat(["RULE-SET,Broker," + G_OUT]);
 }
 
+function buildAiBlock() {
+  return [
+    "DOMAIN-SUFFIX,openai.com," + G_GPT,
+    "DOMAIN-SUFFIX,chatgpt.com," + G_GPT,
+    "DOMAIN-SUFFIX,chat.com," + G_GPT,
+    "DOMAIN-SUFFIX,sora.com," + G_GPT,
+    "DOMAIN-SUFFIX,oaistatic.com," + G_GPT,
+    "DOMAIN-SUFFIX,oaiusercontent.com," + G_GPT,
+    "DOMAIN-KEYWORD,openai," + G_GPT,
+    "RULE-SET,AI-ChatGPT," + G_GPT,
+    "DOMAIN-SUFFIX,anthropic.com," + G_CLAUDE,
+    "DOMAIN-SUFFIX,claude.ai," + G_CLAUDE,
+    "DOMAIN-SUFFIX,claude.com," + G_CLAUDE,
+    "DOMAIN-SUFFIX,claudeusercontent.com," + G_CLAUDE,
+    "DOMAIN-SUFFIX,clau.de," + G_CLAUDE,
+    "RULE-SET,AI-Claude," + G_CLAUDE,
+  ];
+}
+
 function reorderRulesForBroker(rules) {
   rules = Array.isArray(rules) ? rules : [];
-  const brokerBlock = buildBrokerBlock();
+  const brokerBlock = buildBrokerBlock().concat(buildAiBlock());
 
-  const body = rules.filter((r) => !String(r).startsWith("RULE-SET,Broker,"));
+  const body = rules.filter((r) => !/^RULE-SET,(Broker|AI-ChatGPT|AI-Claude),/.test(String(r)));
   const cnGeo = body.filter(isCnGeoRule);
   const middle = body.filter((r) => !isCnGeoRule(r));
   const withoutMatch = middle.filter((r) => !String(r).startsWith("MATCH,"));
@@ -153,6 +184,22 @@ function main(config) {
       path: "./ruleset/Broker.yaml",
       interval: 86400,
     },
+    "AI-ChatGPT": {
+      type: "http",
+      behavior: "classical",
+      format: "yaml",
+      url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/OpenAI/OpenAI.yaml",
+      path: "./ruleset/AI-ChatGPT.yaml",
+      interval: 86400,
+    },
+    "AI-Claude": {
+      type: "http",
+      behavior: "classical",
+      format: "yaml",
+      url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Claude/Claude.yaml",
+      path: "./ruleset/AI-Claude.yaml",
+      interval: 86400,
+    },
   });
 
   setupProxyGroups(config);
@@ -162,7 +209,7 @@ function main(config) {
     config.rules = reorderRulesForBroker(config.rules);
   } catch (e) {
     // 规则重排失败也不影响策略组注入
-    config.rules = buildBrokerBlock().concat(config.rules);
+    config.rules = buildBrokerBlock().concat(buildAiBlock()).concat(config.rules);
   }
 
   return config;
